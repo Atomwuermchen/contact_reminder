@@ -8,6 +8,7 @@ import python_config
 import os
 
 # load configuration
+# CONF_NAME = "example_config.conf"
 CONF_NAME = "contact_reminder.conf"
 conf = python_config.load(os.path.join(os.path.dirname(os.path.realpath(__file__)), CONF_NAME))
 # global variable definition
