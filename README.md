@@ -20,4 +20,5 @@ How to use:
   - Set the timezone in pytz format where the bot shall work in, e.g "Europe/Berlin"- 
 - In contact_reminder.py set CONF_NAME to the name of your configuration file
 
-Run the bot and contact him via telegram
+Run the bot and contact him via telegram.
+Type /help to get a list of possible commands
