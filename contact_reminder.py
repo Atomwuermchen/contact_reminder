@@ -57,7 +57,8 @@ def create_tables(db):
                                     interval integer NOT NULL,
                                     last_contact text,
                                     user_id integer NOT NULL,
-                                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                                    FOREIGN KEY (user_id) REFERENCES users (user_id),
+                                    UNIQUE (first_name, last_name, user_id)
                                     ); """
 
     try:
@@ -125,7 +126,8 @@ def help(update, context):
           "/printcontacts - Prints a list of all of your current contacts\n" \
           "/activate - (Re)Activates the reminder. Afterwards you will get a reminder every day\n" \
           "/deactivate - Deactives daily reminders for your chat ID\n" \
-          "/time - Allows to set a new daily reminder time\n"
+          "/time - Allows to set a new daily reminder time\n" \
+          "/remindme - Immediately sends the due contacts reminder\n"
     context.bot.send_message(chat_id=update.effective_chat.id,
                              text=msg)
 
@@ -392,7 +394,7 @@ def interval(update, context) -> int:
                                  text="You entered {}. But I asked you how often per year you want to get in "
                                       "touch with your contact. You have to enter a number. Let's try "
                                       "it again. How often per year do you want to get in touch with "
-                                      "him or her.",
+                                      "him or her.".format(update.effective_chat.id),
                                  reply_markup=telegram.ReplyKeyboardRemove())
         # INTERVAL = 2
         return 2
@@ -425,7 +427,15 @@ def last_contact(update, context) -> int:
         cur = db.cursor()
         sql = ''' SELECT user_id FROM users WHERE chat_id = ?'''
         cur.execute(sql, (update.effective_chat.id,))
-        sql_dict["user_id"] = cur.fetchone()[0]
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You don't seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return
+        else:
+            sql_dict["user_id"] = result[0]
         # check if a row with this contact name already exists
         sql = '''SELECT contact_id FROM contacts WHERE first_name = ? AND last_name = ? AND user_id = ?'''
         cur.execute(sql, (sql_dict["first_name"], sql_dict["last_name"], sql_dict["last_name"]))
@@ -465,7 +475,15 @@ def print_contacts(update, context):
         cur = db.cursor()
         sql = '''SELECT user_id FROM users WHERE chat_id = ?'''
         cur.execute(sql, (update.effective_chat.id,))
-        user_id = cur.fetchone()[0]
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You don't seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return
+        else:
+            user_id = result[0]
         sql = ''' SELECT contact_id, first_name, last_name FROM contacts
         WHERE user_id = ?'''
         msg = ''
@@ -484,7 +502,7 @@ def print_contacts(update, context):
 
 def reminder(context: telegram.ext.CallbackContext) -> None:
     # retrieve contacts of user
-    # chat_id is passes as context of the job so it can be accessed as
+    # chat_id is passed as context of the job so it can be accessed as
     chat_id = context.job.context
     global DB_PATH
     due_contacts = []
@@ -494,7 +512,16 @@ def reminder(context: telegram.ext.CallbackContext) -> None:
         cur = db.cursor()
         sql = '''SELECT user_id FROM users WHERE chat_id = ?'''
         cur.execute(sql, (chat_id,))
-        user_id = cur.fetchone()[0]
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You don't seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return
+        else:
+            user_id = result[0]
+
         # get list of contacts with all data
         sql = '''SELECT first_name, last_name, interval, last_contact FROM
         contacts WHERE user_id = ?'''
@@ -545,7 +572,15 @@ def last_contact_update(update, context):
         # first get the user_id from the chat_id
         sql = '''SELECT user_id FROM users WHERE chat_id = ?'''
         cur.execute(sql, (update.effective_chat.id,))
-        user_id = cur.fetchone()[0]
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You don't seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return
+        else:
+            user_id = result[0]
         # first determine if there is a first_name last_name record for that user_id in the contacts table
         sql = '''SELECT contact_id FROM contacts WHERE first_name = ? AND last_name = ? AND user_id = ?'''
         cur.execute(sql, (first_name, last_name, user_id))
@@ -600,6 +635,157 @@ def no_contacts_today(update, context):
                              reply_markup=telegram.ReplyKeyboardRemove())
 
 
+# function to directly remind user of due contacts
+def remindme(update, context):
+    # simply makes use of existing reminder function which is called as a job. So make use of
+    # the feature that the jobqueue is available in the context and add a single job to be
+    # executed directly
+    context.job_queue.run_once(reminder, when=datetime.timedelta(seconds=1),
+                               context=update.effective_chat.id)
+
+
+# edit_contact conversation to edit
+def edit_contact_start(update, context) -> int:
+    context.bot.send_message(chat_id=update.effective_chat.id,
+                             text="Let's edit the information of one of your contacts. "
+                                  "What is his or her name? Please tell me the first and last "
+                                  "name as to separate words.",
+                             reply_markup=telegram.ReplyKeyboardRemove())
+    # point to edit_contact_name
+    return 0
+
+
+def edit_contact_name(update, context) -> int:
+    # get first and last name from message
+    [first, last] = update.message.text.split()
+    # check if a database record exists
+    try:
+        global DB_PATH
+        db = connect_database(DB_PATH)
+        cur = db.cursor()
+        # determine user_id from user table
+        sql = '''SELECT user_id FROM users WHERE chat_id = ?'''
+        cur.execute(sql, (update.effective_chat.id,))
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You do not seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return ConversationHandler.END
+        else:
+            user_id = result[0]
+        # check if the entered contact exists in the contact database for the user with user_id
+        sql = '''SELECT contact_id, interval, last_contact FROM contacts WHERE 
+        user_id = ? AND first_name = ? and last_name = ?'''
+        cur.execute(sql, (user_id, first, last))
+        # user_id, first_name and last_name are UNIQUE in contacts table so we can be sure
+        # that we will only fetch one entry in case it exists in the first place
+        result = cur.fetchone()
+        db.close()
+    except sqlite3.Error as e:
+        print(e)
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="Oops. Something went wrong when querying your contact. Please try again.",
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+    if result is None:
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="I am sorry. There is no contact with name {} {} registered "
+                                      "for you. Are you sure that you spelled everything right? You can "
+                                      "use the /printcontacts command to get a list of all contacts "
+                                      "which you have registered.".format(first, last),
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+        return ConversationHandler.END
+    else:
+        [contact_id, interval, last_contact] = result
+    # if the code makes it till here, then the user and contact exists so continue the conversation
+    # asking for the new interval
+    context.bot.send_message(chat_id=update.effective_chat.id,
+                             text="Gotcha. Let's edit {} {}. How often per year do you want to "
+                                  "contact him or her? Please enter an integer number.".format(first, last),
+                             reply_markup=telegram.ReplyKeyboardRemove())
+    # save first and last name in the sql_dict so that we can user it later on in the conversation
+    sql_dict["first_name"] = first
+    sql_dict["last_name"] = last
+    sql_dict["interval"] = interval
+    sql_dict["last_contact"] = last_contact
+    # point to edit_contact_interval
+    return 1
+
+
+def edit_contact_interval(update, context) -> int:
+    global sql_dict, DB_PATH
+    try:
+        interval = int(365 / int(update.message.text))
+    except Exception as ex:
+        print(ex)
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="You entered {}. But I asked you how often per year you want to get in "
+                                      "touch with your contact. You have to enter a number. Let's try "
+                                      "it again. How often per year do you want to get in touch with "
+                                      "him or her.".format(update.effective_chat.id),
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+        # point to edit_contact_interval
+        return 1
+    sql_dict["interval"] = interval
+    context.bot.send_message(chat_id=update.effective_chat.id,
+                             text="Got it. So you want to get in touch with {0} {1} roughly every {2} days.\n"
+                                  "If you remember the date when you had contact with {0} {1} for the last "
+                                  "time, please write it back in the format YYYY-MM-DD. If you respond anything "
+                                  "else, I will simply assume that you want to keep the old date"
+                             .format(sql_dict["first_name"], sql_dict["last_name"], sql_dict["interval"]),
+                             reply_markup=telegram.ReplyKeyboardRemove())
+    # point to edit_contact_last_contact
+    return 2
+
+
+def edit_contact_last_contact(update, context) -> int:
+    global sql_dict
+    # try converting user input to datetime object and if successful update sql_dict
+    try:
+        last_contact_datetime = datetime.datetime.strptime(update.message.text, "%Y-%m-%d")
+        sql_dict["last_contact"] = last_contact_datetime.strftime("%Y_%m_%d")
+    # if this not successfull we won't touch sql_dict
+    except ValueError as e:
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="Ok. We will simply keep your last contact date.",
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+    # then update the database
+    try:
+        db = connect_database(DB_PATH)
+        cur = db.cursor()
+        sql = ''' SELECT user_id FROM users WHERE chat_id = ?'''
+        cur.execute(sql, (update.effective_chat.id,))
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You don't seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return
+        else:
+            sql_dict["user_id"] = result[0]
+        sql = '''UPDATE contacts
+        SET interval = ?, last_contact = ?
+        WHERE user_id = ? AND first_name = ? and last_name = ?'''
+        cur.execute(sql, (sql_dict["interval"], sql_dict["last_contact"],
+                          sql_dict["user_id"], sql_dict["first_name"], sql_dict["last_name"]))
+        db.commit()
+        db.close()
+
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="Done. {} {} has been updated"
+                                 .format(sql_dict["first_name"], sql_dict["last_name"]),
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+    except sqlite3.Error as e:
+        print(e)
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="Oops. Something went wrong. I could not update your contact. "
+                                      "Please try again.",
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+
 # main function
 def main():
 
@@ -623,6 +809,7 @@ def main():
     print_contacts_handler = CommandHandler('printcontacts', print_contacts)
     last_contact_update_handler = MessageHandler(Filters.regex('I contacted \w+ \w+ today!'), last_contact_update)
     no_contacts_today_handler = MessageHandler(Filters.regex("Nope, that's it for today"), no_contacts_today)
+    remindme_handler = CommandHandler('remindme', remindme)
 
     # define the conversation handlers
     register_handler = ConversationHandler(
@@ -651,6 +838,15 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+    edit_contact_handler = ConversationHandler(
+        entry_points=[CommandHandler('editcontact', edit_contact_start)],
+        states={
+            0: [MessageHandler(Filters.text, edit_contact_name)],
+            1: [MessageHandler(Filters.text, edit_contact_interval)],
+            2: [MessageHandler(Filters.text, edit_contact_last_contact)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
     # add all handlers to the dispatcher
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(help_handler)
@@ -662,6 +858,8 @@ def main():
     dispatcher.add_handler(print_contacts_handler)
     dispatcher.add_handler(last_contact_update_handler)
     dispatcher.add_handler(no_contacts_today_handler)
+    dispatcher.add_handler(remindme_handler)
+    dispatcher.add_handler(edit_contact_handler)
 
     # add a jobs to the job queue for each registered user
     try:
