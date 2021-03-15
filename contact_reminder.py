@@ -123,6 +123,7 @@ def help(update, context):
           "/register - Registers your ID as an active user.\n" \
           "/newcontact - Registers a new contact\n" \
           "/editcontact - Edits information for one of your contacts\n" \
+          "/deletecontact - Deletes one of your contacts by name\n" \
           "/printcontacts - Prints a list of all of your current contacts\n" \
           "/activate - (Re)Activates the reminder. Afterwards you will get a reminder every day\n" \
           "/deactivate - Deactives daily reminders for your chat ID\n" \
@@ -394,7 +395,7 @@ def interval(update, context) -> int:
                                  text="You entered {}. But I asked you how often per year you want to get in "
                                       "touch with your contact. You have to enter a number. Let's try "
                                       "it again. How often per year do you want to get in touch with "
-                                      "him or her.".format(update.effective_chat.id),
+                                      "him or her.".format(update.message.text),
                                  reply_markup=telegram.ReplyKeyboardRemove())
         # INTERVAL = 2
         return 2
@@ -514,7 +515,7 @@ def reminder(context: telegram.ext.CallbackContext) -> None:
         cur.execute(sql, (chat_id,))
         result = cur.fetchone()
         if result is None:
-            context.bot.send_message(chat_id=update.effective_chat.id,
+            context.bot.send_message(chat_id=chat_id,
                                      text="You don't seem to be a registered user. Please register "
                                           "first using the /register command.",
                                      reply_markup=telegram.ReplyKeyboardRemove())
@@ -688,6 +689,7 @@ def edit_contact_name(update, context) -> int:
         context.bot.send_message(chat_id=update.effective_chat.id,
                                  text="Oops. Something went wrong when querying your contact. Please try again.",
                                  reply_markup=telegram.ReplyKeyboardRemove())
+        return ConversationHandler.END
     if result is None:
         context.bot.send_message(chat_id=update.effective_chat.id,
                                  text="I am sorry. There is no contact with name {} {} registered "
@@ -723,7 +725,7 @@ def edit_contact_interval(update, context) -> int:
                                  text="You entered {}. But I asked you how often per year you want to get in "
                                       "touch with your contact. You have to enter a number. Let's try "
                                       "it again. How often per year do you want to get in touch with "
-                                      "him or her.".format(update.effective_chat.id),
+                                      "him or her.".format(update.message.text),
                                  reply_markup=telegram.ReplyKeyboardRemove())
         # point to edit_contact_interval
         return 1
@@ -786,6 +788,106 @@ def edit_contact_last_contact(update, context) -> int:
     return ConversationHandler.END
 
 
+# delete_contact conversation to delete one contact by name
+def delete_contact_start(update, context) -> int:
+    context.bot.send_message(chat_id=update.effective_chat.id,
+                             text="You wish to delete one of your contacts? Sure, no problem. "
+                                  "What is his or her name? Please tell me the first and last "
+                                  "name as to separate words.",
+                             reply_markup=telegram.ReplyKeyboardRemove())
+    # point to delete_contact_name
+    return 0
+
+
+def delete_contact_name(update, context) -> int:
+    # get first and last name from message
+    [first, last] = update.message.text.split()
+    # check if a database record exists
+    try:
+        global DB_PATH
+        db = connect_database(DB_PATH)
+        cur = db.cursor()
+        # determine user_id from user table
+        sql = '''SELECT user_id FROM users WHERE chat_id = ?'''
+        cur.execute(sql, (update.effective_chat.id,))
+        result = cur.fetchone()
+        if result is None:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="You do not seem to be a registered user. Please register "
+                                          "first using the /register command.",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return ConversationHandler.END
+        else:
+            user_id = result[0]
+        # check if the entered contact exists in the contact database for the user with user_id
+        sql = '''SELECT contact_id FROM contacts WHERE 
+        user_id = ? AND first_name = ? and last_name = ?'''
+        cur.execute(sql, (user_id, first, last))
+        # user_id, first_name and last_name are UNIQUE in contacts table so we can be sure
+        # that we will only fetch one entry in case it exists in the first place
+        result = cur.fetchone()
+        db.close()
+    except sqlite3.Error as e:
+        print(e)
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="Oops. Something went wrong when querying your contact. Please try again.",
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+        return ConversationHandler.END
+    if result is None:
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="I am sorry. There is no contact with name {} {} registered "
+                                      "for you. Are you sure that you spelled everything right? You can "
+                                      "use the /printcontacts command to get a list of all contacts "
+                                      "which you have registered.".format(first, last),
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+        return ConversationHandler.END
+    else:
+        contact_id = result[0]
+    # if the code makes it till here, then the user and contact exists so continue the conversation
+    # asking for the new interval
+    custom_keyboard = [['Yes, go ahead!'], ['No, I made up my mind!']]
+    context.bot.send_message(chat_id=update.effective_chat.id,
+                             text="You are about to delete your contact {} {}. "
+                                  "This step cannot be undone. "
+                                  "Are you sure that you want to proceed.".format(first, last),
+                             reply_markup=telegram.ReplyKeyboardMarkup(custom_keyboard,
+                                                                       one_time_keyboard=True))
+    # save first and last name in the sql_dict so that we can user it later on in the conversation
+    sql_dict["first_name"] = first
+    sql_dict["last_name"] = last
+    sql_dict["contact_id"] = int(contact_id)
+    # point to delete_contact_confirmation
+    return 1
+
+
+def delete_contact_confirmation(update, context) -> int:
+    global sql_dict, DB_PATH
+    # if the user replied with 'Yes, go ahead!' delete the row with contact_id
+    if update.message.text == "Yes, go ahead!":
+        try:
+            db = connect_database(DB_PATH)
+            cur = db.cursor()
+            sql = '''DELETE FROM contacts WHERE contact_id = ?'''
+            cur.execute(sql, (sql_dict["contact_id"],))
+            db.commit()
+            db.close()
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="Done. {} {} has been deleted".format(sql_dict["first_name"],
+                                                                            sql_dict["last_name"]),
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+        except sqlite3.Error as e:
+            print(e)
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text="Oops, something went wrong when deleting your contact from the database",
+                                     reply_markup=telegram.ReplyKeyboardRemove())
+            return ConversationHandler.END
+    else:
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text="I am happy that you made up your mind and want to keep {} {} "
+                                      "as your contact".format(sql_dict["first_name"], sql_dict["last_name"]),
+                                 reply_markup=telegram.ReplyKeyboardRemove())
+    return ConversationHandler.END
+
 # main function
 def main():
 
@@ -847,6 +949,14 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+    delete_contact_handler = ConversationHandler(
+        entry_points=[CommandHandler('deletecontact', delete_contact_start)],
+        states={
+            0: [MessageHandler(Filters.text, delete_contact_name)],
+            1: [MessageHandler(Filters.text, delete_contact_confirmation)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
     # add all handlers to the dispatcher
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(help_handler)
@@ -860,6 +970,7 @@ def main():
     dispatcher.add_handler(no_contacts_today_handler)
     dispatcher.add_handler(remindme_handler)
     dispatcher.add_handler(edit_contact_handler)
+    dispatcher.add_handler(delete_contact_handler)
 
     # add a jobs to the job queue for each registered user
     try:
